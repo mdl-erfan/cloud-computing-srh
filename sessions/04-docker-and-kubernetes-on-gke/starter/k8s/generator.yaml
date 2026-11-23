@@ -18,8 +18,8 @@ spec:
     spec:
       containers:
         - name: generator
-          # Replace PROJECT_ID with your project ID (step 5 does it for you).
-          image: europe-west3-docker.pkg.dev/PROJECT_ID/freight/generator:v1
+          # Replace srhuni with your project ID (step 5 does it for you).
+          image: europe-west3-docker.pkg.dev/srhuni/freight/generator:v1
           args: ["stream"]
           env:
             - name: SINK
