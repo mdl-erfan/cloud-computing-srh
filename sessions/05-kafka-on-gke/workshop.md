@@ -35,6 +35,8 @@ docker build -t $REPO/generator:v2 .
 docker push $REPO/generator:v2
 ```
 
+Check the push ended with a `digest:` line. From Cloud Shell, `docker push` sometimes fails with `failed to do request ... connect: connection refused`; run the same `docker push` again until it shows the digest.
+
 `v1` stays in the registry. Kubernetes runs whichever tag you ask for, which is why you never reuse a tag.
 
 ## 2. Install the Strimzi operator (5 min)
@@ -98,6 +100,8 @@ kubectl apply -f kafka/producer.yaml
 kubectl -n kafka get pods -l app=ocean-producer
 ```
 
+Wait until it says `Running`. `ImagePullBackOff` means `v2` isn't in your registry: go back to step 1 and push it again.
+
 Read the first events back, with their key, partition and offset:
 
 ```bash
@@ -106,7 +110,7 @@ kk kafka-console-consumer.sh --bootstrap-server $B --topic ocean-events \
   --property print.key=true --property print.partition=true --property print.offset=true
 ```
 
-Kafka 4.3 warns that `--property` is deprecated. It still works, so ignore the warning.
+Kafka 4.3 warns that `--property` is deprecated, and adds a notice about the new consumer rebalance protocol (KIP-848). Both still work as written, so ignore them. The same goes for `--producer-property` in the stretch.
 
 The key is the shipment ID. Pick one from the output and find all its events in the first 200:
 
@@ -169,12 +173,14 @@ kk kafka-consumer-groups.sh --bootstrap-server $B --group ops-dashboard \
 kk kafka-consumer-groups.sh --bootstrap-server $B --describe --group ops-dashboard
 ```
 
-The lag is now the whole topic. You can also rewind to a point in time, for example to just before a bug went live:
+The lag is now the whole topic. You can also rewind by time, for example to just before a bug went live. This moves the group back to where the log was 10 minutes ago:
 
 ```bash
 kk kafka-consumer-groups.sh --bootstrap-server $B --group ops-dashboard \
-  --topic ocean-events --reset-offsets --to-datetime 2026-11-25T17:00:00.000 --execute
+  --topic ocean-events --reset-offsets --by-duration PT10M --execute
 ```
+
+To rewind to a fixed moment, use `--to-datetime 2026-11-25T17:00:00.000` instead. Kafka reads that time as UTC, an hour behind Hamburg in winter, and a time after the newest event puts the group at the end of the log.
 
 This is the move Kappa depends on: fix your processing code, then rebuild its output by replaying the log. In session 8 you do exactly that.
 
@@ -218,14 +224,18 @@ cd ~/cloud-computing-srh/sessions/04-docker-and-kubernetes-on-gke/starter
 terraform apply -var node_count=0
 ```
 
-Don't delete the cluster, the `kafka` namespace or the PersistentVolumeClaims: session 7 reads this topic, and session 8 replays it. Next time, `terraform apply` brings everything back with its data, and the producer carries on where it stopped. The brokers take a few minutes to come up.
+Don't delete the cluster, the `kafka` namespace or the PersistentVolumeClaims: session 7 reads this topic, and session 8 replays it. Next time, `terraform apply` brings everything back with its data, and the producer carries on where it stopped. The brokers take a few minutes to come up: watch `kubectl -n kafka get pods --watch` until the three `freight-dual` pods are `Running`. Don't rely on `kubectl wait kafka/freight`: it still remembers being Ready from before, and returns at once.
+
+The `kafka-client` pod doesn't come back on its own: it's a plain pod, not a Deployment. To use `kk` again, for example to finish `docs/kafka.md` at home, run `kubectl apply -f kafka/client.yaml` in `sessions/05-kafka-on-gke/starter`.
 
 ## If something goes wrong
 
 - **`freight-dual` pods stuck in `Pending`**: `kubectl -n kafka describe pod freight-dual-0` says why. `Insufficient cpu` or `Insufficient memory` means something else is using the node: check `kubectl get pods --all-namespaces` and delete Monday's generator if it's still there. No nodes at all means you skipped step 0.
 - **`kubectl wait` times out**: read the operator's log, `kubectl -n kafka logs deployment/strimzi-cluster-operator --tail=50`. Most problems show up there.
+- **The producer is in `ImagePullBackOff`**: `generator:v2` isn't in your registry, usually because `docker push` failed. Push it again (step 1), then `kubectl -n kafka delete pod -l app=ocean-producer` so it pulls straight away.
 - **The producer is in `CrashLoopBackOff`**: check you're running `generator:v2`, not `v1`. `kubectl -n kafka logs deployment/ocean-producer` shows the error.
+- **A consumer in step 5 never finishes**: nothing is being written. Check the producer is `Running`.
 - **A consumer with `--group` shows nothing**: that group has already read everything. `--from-beginning` only applies to a group that's never read before. Use a new group name, or reset its offsets.
 - **`--reset-offsets` says the group is active**: a consumer in that group is still running. Stop it, wait 30 seconds, and try again.
-- **`error: unable to upgrade connection`** from `kk`: the `kafka-client` pod isn't ready yet, or was deleted. Run `kubectl apply -f kafka/client.yaml` again.
+- **`error: unable to upgrade connection`** or **`pods "kafka-client" not found`** from `kk`: the `kafka-client` pod isn't ready yet, or is gone after scaling to zero. Run `kubectl apply -f kafka/client.yaml` again.
 - **After scaling up, the producer restarts a few times**: it starts before Kafka is ready. It settles once the brokers are up.
